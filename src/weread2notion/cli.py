@@ -286,6 +286,33 @@ def get_chapter_info(bookId):
     return {item["chapterUid"]: item for item in chapters if "chapterUid" in item}
 
 
+def build_read_info_properties(bookId):
+    """读取阅读进度，转换成 状态 / 阅读时长 / 阅读进度 / 时间 属性"""
+    if not has_any_property(("状态", "阅读时长", "阅读进度", "时间")):
+        return {}
+    read_info = get_read_info(bookId=bookId)
+    markedStatus = read_info.get("markedStatus", 0)
+    readingTime = read_info.get("readingTime", 0) or 0
+    format_time = ""
+    hour = readingTime // 3600
+    if hour > 0:
+        format_time += f"{hour}时"
+    minutes = readingTime % 3600 // 60
+    if minutes > 0:
+        format_time += f"{minutes}分"
+    raw_properties = {
+        "状态": "读完" if markedStatus == 4 else "在读",
+        "阅读时长": format_time,
+        "阅读进度": read_info.get("readingProgress", 0),
+    }
+    # 没有读完时间时不写，避免出现 1970-01-01
+    if read_info.get("finishedDate"):
+        raw_properties["时间"] = datetime.utcfromtimestamp(
+            read_info.get("finishedDate")
+        ).strftime("%Y-%m-%d %H:%M:%S")
+    return raw_properties
+
+
 def insert_to_notion(bookName, bookId, cover, sort, author, isbn, rating, categories):
     """插入到notion"""
     if not cover or not cover.startswith("http"):
@@ -302,31 +329,7 @@ def insert_to_notion(bookName, bookId, cover, sort, author, isbn, rating, catego
     }
     if categories != None:
         raw_properties["分类"] = categories
-    read_info = (
-        get_read_info(bookId=bookId)
-        if has_any_property(("状态", "阅读时长", "阅读进度", "时间"))
-        else None
-    )
-    if read_info != None:
-        markedStatus = read_info.get("markedStatus", 0)
-        readingTime = read_info.get("readingTime", 0)
-        readingProgress = read_info.get("readingProgress", 0)
-        format_time = ""
-        hour = readingTime // 3600
-        if hour > 0:
-            format_time += f"{hour}时"
-        minutes = readingTime % 3600 // 60
-        if minutes > 0:
-            format_time += f"{minutes}分"
-        raw_properties["状态"] = "读完" if markedStatus == 4 else "在读"
-        raw_properties["阅读时长"] = format_time
-        raw_properties["阅读进度"] = readingProgress
-        if "finishedDate" in read_info:
-            raw_properties["时间"] = datetime.utcfromtimestamp(
-                read_info.get("finishedDate")
-            ).strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
+    raw_properties.update(build_read_info_properties(bookId))
 
     properties = build_notion_properties(raw_properties)
     icon = get_icon(cover)
@@ -834,6 +837,83 @@ def sync():
             results = add_children(id, children)
             if len(grandchild) > 0 and results != None:
                 add_grandchild(grandchild, results)
+    notebook_book_ids = {
+        (b.get("book") or b).get("bookId") or b.get("bookId") for b in (books or [])
+    }
+    sync_shelf_books(notebook_book_ids)
+
+
+def get_shelf_books():
+    """获取书架上的电子书（不含有声书、公众号）"""
+    data = weread.request("/shelf/sync")
+    books = data.get("books") or []
+    return [
+        book
+        for book in books
+        if book.get("bookId") and not str(book.get("bookId")).startswith("MP_")
+    ]
+
+
+def sync_shelf_books(notebook_book_ids):
+    """把没有划线/笔记的书架书籍也同步到 Notion，只写属性，不写正文。
+
+    - Notion 里还没有的书：新建页面，Sort 记为 0，不影响笔记的增量游标
+    - Notion 里已有的书：只更新阅读状态、进度、时长、读完时间
+    - 有划线/笔记的书仍由原来的笔记流程处理，这里跳过
+    """
+    if os.getenv("SYNC_SHELF", "true").strip().lower() in {"0", "false", "no"}:
+        print("SYNC_SHELF 已关闭，跳过书架同步")
+        return
+    try:
+        shelf_books = get_shelf_books()
+    except Exception as e:
+        print(f"获取书架失败，跳过书架同步: {e}")
+        return
+    shelf_books = [b for b in shelf_books if b.get("bookId") not in notebook_book_ids]
+    print(f"书架上没有笔记的书共 {len(shelf_books)} 本，开始同步")
+    for index, book in enumerate(shelf_books):
+        bookId = book.get("bookId")
+        title = book.get("title") or ""
+        try:
+            response = query_data_source(
+                filter=build_equals_filter("BookId", bookId), page_size=1
+            )
+            existing = response.get("results") or []
+            if existing:
+                properties = build_notion_properties(build_read_info_properties(bookId))
+                if properties:
+                    client.pages.update(page_id=existing[0]["id"], properties=properties)
+                print(f"[书架 {index+1}/{len(shelf_books)}] 已更新 {title}")
+                continue
+            cover = (book.get("cover") or "").replace("/s_", "/t7_")
+            if not cover.startswith("http"):
+                cover = "https://www.notion.so/icons/book_gray.svg"
+            category = book.get("category")
+            raw_properties = {
+                title_property_name: title,
+                "BookId": bookId,
+                "链接": f"https://weread.qq.com/web/reader/{calculate_book_str_id(bookId)}",
+                "作者": book.get("author") or "",
+                "Sort": 0,
+            }
+            if category:
+                raw_properties["分类"] = category if isinstance(category, list) else [category]
+            if has_any_property(("ISBN", "评分")):
+                isbn, rating = get_bookinfo(bookId)
+                raw_properties["ISBN"] = isbn
+                raw_properties["评分"] = rating
+            raw_properties.update(build_read_info_properties(bookId))
+            icon = get_icon(cover)
+            client.pages.create(
+                parent={"type": "data_source_id", "data_source_id": data_source_id},
+                icon=icon,
+                cover=icon,
+                properties=build_notion_properties(raw_properties),
+            )
+            print(f"[书架 {index+1}/{len(shelf_books)}] 已新增 {title}")
+        except Exception as e:
+            print(f"[书架] 同步 {title} 失败，跳过: {e}")
+        time.sleep(0.3)
 
 
 def main(argv=None):
