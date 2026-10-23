@@ -31,6 +31,7 @@ data_source_property_types = {}
 title_property_name = None
 skipped_property_names = set()
 weread = None
+_reading_time_debug_count = 0
 
 load_dotenv()
 WEREAD_URL = "https://weread.qq.com/"
@@ -194,6 +195,14 @@ def get_bookmark_list(bookId):
 def get_read_info(bookId):
     data = weread.request("/book/getprogress", bookId=bookId)
     book = data.get("book") or {}
+    # 诊断：阅读时长为 0 时，打印接口实际返回的字段（最多 5 本）
+    global _reading_time_debug_count
+    if not book.get("recordReadingTime") and _reading_time_debug_count < 5:
+        _reading_time_debug_count += 1
+        print(
+            f"[诊断] {bookId} 阅读时长为空，顶层字段: {sorted(data.keys())}，"
+            f"book 字段: {book}"
+        )
     progress = to_number(book.get("progress")) or 0
     reading_progress = normalize_reading_progress(progress)
     finish_time = book.get("finishTime") or 0
