@@ -843,7 +843,7 @@ def sync():
     notebook_book_ids = {
         (b.get("book") or b).get("bookId") or b.get("bookId") for b in (books or [])
     }
-    sync_shelf_books(notebook_book_ids)
+    sync_shelf_books(notebook_book_ids, books)
 
 
 def get_shelf_books():
@@ -857,7 +857,7 @@ def get_shelf_books():
     ]
 
 
-def sync_shelf_books(notebook_book_ids):
+def sync_shelf_books(notebook_book_ids, notebook_books=None):
     """把书架书籍同步到 Notion，只写属性，不写正文。
 
     - Notion 里已有的书（包括有笔记的）：刷新阅读状态、进度、时长、读完时间
@@ -872,7 +872,14 @@ def sync_shelf_books(notebook_book_ids):
     except Exception as e:
         print(f"获取书架失败，跳过书架同步: {e}")
         return
-    print(f"书架上共 {len(shelf_books)} 本，开始刷新阅读状态")
+    # 有笔记但已从书架移除的书，也要刷新状态
+    shelf_ids = {b.get("bookId") for b in shelf_books}
+    for item in notebook_books or []:
+        info = item.get("book") or item
+        if info.get("bookId") and info.get("bookId") not in shelf_ids:
+            shelf_books.append(info)
+            shelf_ids.add(info.get("bookId"))
+    print(f"书架和笔记中共 {len(shelf_books)} 本，开始刷新阅读状态")
     for index, book in enumerate(shelf_books):
         bookId = book.get("bookId")
         title = book.get("title") or ""
