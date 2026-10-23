@@ -195,13 +195,18 @@ def get_bookmark_list(bookId):
 def get_read_info(bookId):
     data = weread.request("/book/getprogress", bookId=bookId)
     book = data.get("book") or {}
-    # 诊断：阅读时长为 0 时，打印接口实际返回的字段（最多 5 本）
+    # 诊断：读过一半以上、但 recordReadingTime 为 0 的书，打印两个时长字段（最多 10 本）
     global _reading_time_debug_count
-    if not book.get("recordReadingTime") and _reading_time_debug_count < 5:
+    if (
+        not book.get("recordReadingTime")
+        and (to_number(book.get("progress")) or 0) >= 50
+        and _reading_time_debug_count < 10
+    ):
         _reading_time_debug_count += 1
         print(
-            f"[诊断] {bookId} 阅读时长为空，顶层字段: {sorted(data.keys())}，"
-            f"book 字段: {book}"
+            f"[诊断] {bookId} progress={book.get('progress')} "
+            f"recordReadingTime={book.get('recordReadingTime')} "
+            f"readingTime={book.get('readingTime')} finishTime={book.get('finishTime')}"
         )
     progress = to_number(book.get("progress")) or 0
     reading_progress = normalize_reading_progress(progress)
@@ -215,7 +220,7 @@ def get_read_info(bookId):
         marked_status = 1
     return {
         "markedStatus": marked_status,
-        "readingTime": book.get("recordReadingTime") or 0,
+        "readingTime": book.get("recordReadingTime") or book.get("readingTime") or 0,
         "readingProgress": reading_progress,
         "finishedDate": finish_time,
     }
