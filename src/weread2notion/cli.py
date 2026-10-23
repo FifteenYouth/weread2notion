@@ -199,11 +199,11 @@ def get_read_info(bookId):
     finish_time = book.get("finishTime") or 0
     update_time = book.get("updateTime") or 0
     # 只认微信读书自己的「读完」标记；进度 100% 但没标读完的不算读完
-    # 没读完的书：最近 READING_ACTIVE_DAYS 天内翻过算「在读」，否则算「搁置」
+    # 没读完的书：有进度且最近 READING_ACTIVE_DAYS 天内翻过算「在读」，否则算「搁置」（进度为 0 的不算在读）
     active_days = to_number(os.getenv("READING_ACTIVE_DAYS")) or 7
     if finish_time:
         marked_status = 4
-    elif update_time and time.time() - update_time <= active_days * 86400:
+    elif progress > 0 and update_time and time.time() - update_time <= active_days * 86400:
         marked_status = 2
     else:
         marked_status = 3
