@@ -31,7 +31,6 @@ data_source_property_types = {}
 title_property_name = None
 skipped_property_names = set()
 weread = None
-_reading_time_debug_count = 0
 
 load_dotenv()
 WEREAD_URL = "https://weread.qq.com/"
@@ -195,29 +194,19 @@ def get_bookmark_list(bookId):
 def get_read_info(bookId):
     data = weread.request("/book/getprogress", bookId=bookId)
     book = data.get("book") or {}
-    # 诊断：读过一半以上、但 recordReadingTime 为 0 的书，打印两个时长字段（最多 10 本）
-    global _reading_time_debug_count
-    if (
-        not book.get("recordReadingTime")
-        and (to_number(book.get("progress")) or 0) >= 50
-        and _reading_time_debug_count < 10
-    ):
-        _reading_time_debug_count += 1
-        print(
-            f"[诊断] {bookId} progress={book.get('progress')} "
-            f"recordReadingTime={book.get('recordReadingTime')} "
-            f"readingTime={book.get('readingTime')} finishTime={book.get('finishTime')}"
-        )
     progress = to_number(book.get("progress")) or 0
     reading_progress = normalize_reading_progress(progress)
     finish_time = book.get("finishTime") or 0
     update_time = book.get("updateTime") or 0
-    if finish_time or progress >= 100:
+    # 只认微信读书自己的「读完」标记；进度 100% 但没标读完的不算读完
+    # 没读完的书：最近 READING_ACTIVE_DAYS 天内翻过算「在读」，否则算「搁置」
+    active_days = to_number(os.getenv("READING_ACTIVE_DAYS")) or 7
+    if finish_time:
         marked_status = 4
-    elif update_time or book.get("isStartReading") or progress > 0:
+    elif update_time and time.time() - update_time <= active_days * 86400:
         marked_status = 2
     else:
-        marked_status = 1
+        marked_status = 3
     return {
         "markedStatus": marked_status,
         "readingTime": book.get("recordReadingTime") or book.get("readingTime") or 0,
@@ -315,7 +304,7 @@ def build_read_info_properties(bookId):
     if minutes > 0:
         format_time += f"{minutes}分"
     raw_properties = {
-        "状态": "读完" if markedStatus == 4 else "在读",
+        "状态": {4: "读完", 2: "在读"}.get(markedStatus, "搁置"),
         "阅读时长": format_time,
         "阅读进度": read_info.get("readingProgress", 0),
     }
@@ -869,11 +858,11 @@ def get_shelf_books():
 
 
 def sync_shelf_books(notebook_book_ids):
-    """把没有划线/笔记的书架书籍也同步到 Notion，只写属性，不写正文。
+    """把书架书籍同步到 Notion，只写属性，不写正文。
 
-    - Notion 里还没有的书：新建页面，Sort 记为 0，不影响笔记的增量游标
-    - Notion 里已有的书：只更新阅读状态、进度、时长、读完时间
-    - 有划线/笔记的书仍由原来的笔记流程处理，这里跳过
+    - Notion 里已有的书（包括有笔记的）：刷新阅读状态、进度、时长、读完时间
+    - Notion 里还没有、也没有笔记的书：新建页面，Sort 记为 0，不影响笔记的增量游标
+    - 有笔记但还没建页面的书：交给原来的笔记流程
     """
     if os.getenv("SYNC_SHELF", "true").strip().lower() in {"0", "false", "no"}:
         print("SYNC_SHELF 已关闭，跳过书架同步")
@@ -883,8 +872,7 @@ def sync_shelf_books(notebook_book_ids):
     except Exception as e:
         print(f"获取书架失败，跳过书架同步: {e}")
         return
-    shelf_books = [b for b in shelf_books if b.get("bookId") not in notebook_book_ids]
-    print(f"书架上没有笔记的书共 {len(shelf_books)} 本，开始同步")
+    print(f"书架上共 {len(shelf_books)} 本，开始刷新阅读状态")
     for index, book in enumerate(shelf_books):
         bookId = book.get("bookId")
         title = book.get("title") or ""
@@ -898,6 +886,8 @@ def sync_shelf_books(notebook_book_ids):
                 if properties:
                     client.pages.update(page_id=existing[0]["id"], properties=properties)
                 print(f"[书架 {index+1}/{len(shelf_books)}] 已更新 {title}")
+                continue
+            if bookId in notebook_book_ids:
                 continue
             cover = (book.get("cover") or "").replace("/s_", "/t7_")
             if not cover.startswith("http"):
